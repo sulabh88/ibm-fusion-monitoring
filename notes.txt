@@ -1,0 +1,14 @@
+index=_internal source="*metrics.log" group=queue
+| stats latest(size) as current_size by name
+| eval max_size=case(name="parsingQueue", 500, name="indexQueue", 1000)
+| eval utilization=(current_size/max_size)*100
+| table name, current_size, max_size, utilization
+
+
+
+index=_internal source="*metrics.log" host="<forwarder-host>"
+	
+
+curl -u admin:password https://<splunk-host>:8089/services/admin/inputstatus/TCP/Raw?output_mode=json
+
+		
