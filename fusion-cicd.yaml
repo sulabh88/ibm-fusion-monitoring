@@ -1,0 +1,56 @@
+stages:
+  - execute_script
+
+variables:
+  VAULT_ADDR: "https://vault.example.com"  # Vault server address
+  NAMESPACE: "ibm-spectrum-scale"
+  EMAIL: "admin@example.com"  # Email for alerts
+
+execute-script:
+  stage: execute_script
+  image: bitnami/kubectl:latest  # Image with `kubectl` and `oc` command support
+  script:
+    - echo "Starting script execution on multiple clusters..."
+
+    # Configure Vault access (assuming GitLab CI/CD is authenticated with Vault)
+    - export VAULT_TOKEN=${CI_JOB_TOKEN}
+
+    # Define clusters and retrieve passwords from Vault
+    - CLUSTERS=("https://cluster1.example.com" "https://cluster2.example.com")
+
+    for cluster in "${CLUSTERS[@]}"; do
+      if [[ "$cluster" == "https://cluster1.example.com" ]]; then
+        KUBEADMIN_PASS=$(vault kv get -field=password secret/cluster1/kubeadmin)
+      elif [[ "$cluster" == "https://cluster2.example.com" ]]; then
+        KUBEADMIN_PASS=$(vault kv get -field=password secret/cluster2/kubeadmin)
+      fi
+
+      echo "Logging into $cluster with kubeadmin..."
+      oc login --server="$cluster" -u kubeadmin -p "$KUBEADMIN_PASS"
+
+      # Run the commands in one pod in the namespace
+      pod=$(oc get pods -n $NAMESPACE -o name | grep "compute" | head -n 1)
+      if [ -n "$pod" ]; then
+        echo "Running commands in pod $pod in namespace $NAMESPACE on $cluster..."
+
+        # Run mmgetstate -a and check for inactive state
+        if oc exec $pod -n $NAMESPACE -- mmgetstate -a | grep -q "inactive"; then
+          echo "Alert: GPFS state is inactive in $pod on $cluster" | mail -s "GPFS Inactive Alert" $EMAIL
+        fi
+
+        # Run mmhealth cluster show and check for degraded health
+        if oc exec $pod -n $NAMESPACE -- mmhealth cluster show | grep -q "degraded"; then
+          echo "Alert: GPFS health is degraded in $pod on $cluster" | mail -s "GPFS Health Degraded Alert" $EMAIL
+        fi
+      else
+        echo "No compute pods found in $NAMESPACE namespace on $cluster."
+      fi
+
+      # Logout and clean up
+      oc logout
+      unset KUBEADMIN_PASS
+    done
+
+  only:
+    - schedules  # Ensures this job only runs on a schedule
+

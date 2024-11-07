@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Define the clusters with their API endpoints and kubeadmin passwords
+declare -A clusters=(
+    ["cluster1"]="https://api.cluster1.example.com:6443"
+    ["cluster2"]="https://api.cluster2.example.com:6443"
+    ["cluster3"]="https://api.cluster3.example.com:6443"
+)
+
+# Kubeadmin passwords for each cluster (replace with actual passwords or use a secure method to retrieve them)
+declare -A kubeadmin_passwords=(
+    ["cluster1"]="password_for_cluster1"
+    ["cluster2"]="password_for_cluster2"
+    ["cluster3"]="password_for_cluster3"
+)
+
+# Define the namespace and email address for alerts
+NAMESPACE="idm-spectrum-scale"
+ALERT_EMAIL="admin@example.com"
+
+# Function to log into a cluster and check waiting times
+check_cluster() {
+    local cluster_name=$1
+    local api_endpoint=$2
+    local kubeadmin_password=${kubeadmin_passwords[$cluster_name]}
+
+    echo "Logging into $cluster_name..."
+    # Login to the cluster using kubeadmin
+    oc login "$api_endpoint" -u kubeadmin -p "$kubeadmin_password" --insecure-skip-tls-verify
+    
+    if [ $? -ne 0 ]; then
+        echo "Failed to log into $cluster_name."
+        return
+    fi
+
+    # Find a compute pod in the specified namespace
+    pod_name=$(oc get pods -n "$NAMESPACE" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+    
+    if [ -z "$pod_name" ]; then
+        echo "No running compute pod found in namespace $NAMESPACE in $cluster_name."
+        oc logout
+        return
+    fi
+
+    echo "Found pod $pod_name in $cluster_name. Executing command..."
+
+    # Run the command inside the pod and get output
+    output=$(oc exec "$pod_name" -n "$NAMESPACE" -- mmlsnode -N waiters -L | fgrep Waiting | sort -n -k3)
+
+    # Process output to check for waiting times > 20 seconds
+    alert_needed=false
+    while IFS= read -r line; do
+        # Extract waiting time from the output
+        waiting_time=$(echo "$line" | grep -oP 'Waiting \K[\d.]+')
+        
+        # Check if waiting time exceeds 20 seconds
+        if (( $(echo "$waiting_time > 20" | bc -l) )); then
+            alert_needed=true
+            echo "Warning: Found a waiting time of $waiting_time seconds in $cluster_name pod $pod_name."
+        fi
+    done <<< "$output"
+
+    # If alert needed, send an email
+    if [ "$alert_needed" = true ]; then
+        echo -e "Subject: Waiting Time Alert in $cluster_name\n\nThe following output indicates that waiting times exceeded 20 seconds:\n\n$output" | sendmail -v "$ALERT_EMAIL"
+    else
+        echo "No waiting time exceeded 20 seconds in $cluster_name."
+    fi
+
+    # Logout from the cluster
+    oc logout
+}
+
+# Loop through each cluster and check waiting times
+for cluster_name in "${!clusters[@]}"; do
+    check_cluster "$cluster_name" "${clusters[$cluster_name]}"
+done
+
